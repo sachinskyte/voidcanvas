@@ -27,14 +27,19 @@ let currentText = '';
 let cursorPosition = 0;
 let textX = 0;
 let textY = 0;
-const maxLineWidth = 500; // Maximum width for text wrapping
+const maxLineWidth = 500;
+const fontSize = 20;
+const fontFamily = '"Helvetica Neue", Arial, sans-serif';
+const lineHeight = fontSize * 1.2;
+
+// Text blocks storage
+let textBlocks = [];
+let editingBlockIndex = -1;
 
 // Initialize
 function init() {
     resizeCanvas();
     bindEvents();
-    
-    // Initialize canvas with white background
     fillCanvasBackground();
 }
 
@@ -49,7 +54,6 @@ startButton.addEventListener('click', () => {
     intro.style.display = 'none';
     toolbar.style.display = 'flex';
     
-    // Request fullscreen if available
     if (document.documentElement.requestFullscreen) {
         document.documentElement.requestFullscreen().catch(err => {
             console.log("Fullscreen request failed:", err);
@@ -59,53 +63,25 @@ startButton.addEventListener('click', () => {
 
 // Bind all event listeners
 function bindEvents() {
-    // Tool selection
-    pencilTool.addEventListener('click', () => {
-        setTool('pencil');
-    });
-
-    textTool.addEventListener('click', () => {
-        setTool('text');
-    });
-
-    eraserTool.addEventListener('click', () => {
-        setTool('eraser');
-    });
-
-    // Clear button
-    clearButton.addEventListener('click', () => {
-        // Fill with white instead of clearing to transparent
-        fillCanvasBackground();
-        
-        // Also clear any text input
-        endTextInput();
-    });
-
-    // Save button
+    pencilTool.addEventListener('click', () => setTool('pencil'));
+    textTool.addEventListener('click', () => setTool('text'));
+    eraserTool.addEventListener('click', () => setTool('eraser'));
+    clearButton.addEventListener('click', clearCanvas);
     saveButton.addEventListener('click', saveCanvas);
-
-    // Drawing events
+    
     canvas.addEventListener('mousedown', handleMouseDown);
     canvas.addEventListener('touchstart', handleTouchStart);
-    
     canvas.addEventListener('mousemove', handleMouseMove);
     canvas.addEventListener('touchmove', handleTouchMove);
-    
     canvas.addEventListener('mouseup', stopDrawing);
     canvas.addEventListener('touchend', stopDrawing);
-    
     canvas.addEventListener('mouseout', stopDrawing);
-
-    // Text input events
-    document.addEventListener('keydown', handleKeyDown);
     
-    // Canvas click for text positioning
+    document.addEventListener('keydown', handleKeyDown);
     canvas.addEventListener('click', handleCanvasClick);
-
-    // Window resize
     window.addEventListener('resize', resizeCanvas);
     
-    // Auto-hide toolbar when not used for a while
+    // Auto-hide toolbar
     let toolbarTimeout;
     document.addEventListener('mousemove', () => {
         toolbar.style.opacity = '0.8';
@@ -118,21 +94,25 @@ function bindEvents() {
     });
 }
 
+// Clear canvas
+function clearCanvas() {
+    fillCanvasBackground();
+    endTextInput();
+    textBlocks = [];
+}
+
 // Set the current tool
 function setTool(tool) {
-    // If changing from text tool, finish any text input
     if (currentTool === 'text' && isTyping) {
-        finishTextInput();
+        saveCurrentTextBlock();
     }
     
     currentTool = tool;
     
-    // Update UI
     [pencilTool, textTool, eraserTool].forEach(toolBtn => {
         toolBtn.classList.remove('active');
     });
 
-    // Set active tool
     if (tool === 'pencil') {
         pencilTool.classList.add('active');
         ctx.lineWidth = 2;
@@ -149,22 +129,16 @@ function setTool(tool) {
     }
 }
 
-// Resize the canvas to match window size
+// Resize the canvas
 function resizeCanvas() {
-    // Save the current drawing
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     
-    // Set canvas dimensions to match the window
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
     
-    // Fill with white background
     fillCanvasBackground();
-    
-    // Restore the drawing
     ctx.putImageData(imageData, 0, 0);
     
-    // Set canvas styles
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     
@@ -175,15 +149,24 @@ function resizeCanvas() {
         ctx.lineWidth = 20;
         ctx.strokeStyle = '#fff';
     }
+    
+    redrawTextBlocks();
 }
 
 // Mouse/Touch event handlers
 function handleMouseDown(e) {
     if (currentTool === 'text') {
         if (isTyping) {
-            finishTextInput();
+            saveCurrentTextBlock();
         }
-        startTextInput(e.offsetX, e.offsetY);
+        
+        const clickedBlockIndex = findTextBlockAt(e.offsetX, e.offsetY);
+        
+        if (clickedBlockIndex !== -1) {
+            editTextBlock(clickedBlockIndex, e.offsetX, e.offsetY);
+        } else {
+            startTextInput(e.offsetX, e.offsetY);
+        }
     } else {
         isDrawing = true;
         [lastX, lastY] = [e.offsetX, e.offsetY];
@@ -192,7 +175,13 @@ function handleMouseDown(e) {
 
 function handleCanvasClick(e) {
     if (currentTool === 'text' && !isTyping) {
-        startTextInput(e.offsetX, e.offsetY);
+        const clickedBlockIndex = findTextBlockAt(e.offsetX, e.offsetY);
+        
+        if (clickedBlockIndex !== -1) {
+            editTextBlock(clickedBlockIndex, e.offsetX, e.offsetY);
+        } else {
+            startTextInput(e.offsetX, e.offsetY);
+        }
     }
 }
 
@@ -206,9 +195,16 @@ function handleTouchStart(e) {
         
         if (currentTool === 'text') {
             if (isTyping) {
-                finishTextInput();
+                saveCurrentTextBlock();
             }
-            startTextInput(x, y);
+            
+            const touchedBlockIndex = findTextBlockAt(x, y);
+            
+            if (touchedBlockIndex !== -1) {
+                editTextBlock(touchedBlockIndex, x, y);
+            } else {
+                startTextInput(x, y);
+            }
         } else {
             isDrawing = true;
             [lastX, lastY] = [x, y];
@@ -257,63 +253,70 @@ function startTextInput(x, y) {
     cursorPosition = 0;
     textX = x;
     textY = y;
+    editingBlockIndex = -1;
     
-    // Clear previous text overlay
     textOverlay.textContent = '';
-    
-    // Position and show the cursor
-    updateCursorPosition();
-    textCursor.style.display = 'block';
     textOverlay.style.display = 'block';
-    
-    // Set initial position for text overlay
     textOverlay.style.left = `${x}px`;
-    textOverlay.style.top = `${y - 16}px`; // Adjust for text baseline
-
-    // Set max width for text overlay to enable wrapping
+    textOverlay.style.top = `${y - fontSize}px`;
+    textOverlay.style.font = `${fontSize}px ${fontFamily}`;
     textOverlay.style.maxWidth = `${maxLineWidth}px`;
-    textOverlay.style.wordWrap = 'break-word';
+    textOverlay.style.opacity = '1';
+    
+    textCursor.style.display = 'block';
+    textCursor.style.left = `${x}px`;
+    textCursor.style.top = `${y - fontSize}px`;
+    
+    // Start cursor blinking
+    startCursorBlink();
+}
+
+// Cursor blinking
+let cursorBlinkInterval;
+function startCursorBlink() {
+    clearInterval(cursorBlinkInterval);
+    textCursor.style.visibility = 'visible';
+    cursorBlinkInterval = setInterval(() => {
+        textCursor.style.visibility = textCursor.style.visibility === 'visible' ? 'hidden' : 'visible';
+    }, 500);
+}
+
+function stopCursorBlink() {
+    clearInterval(cursorBlinkInterval);
+    textCursor.style.visibility = 'hidden';
 }
 
 function updateCursorPosition() {
-    // Create a temporary span to measure text width
-    const tempSpan = document.createElement('span');
-    tempSpan.style.font = '16px "Helvetica Neue", Arial, sans-serif';
-    tempSpan.style.position = 'absolute';
-    tempSpan.style.visibility = 'hidden';
-    tempSpan.style.whiteSpace = 'pre-wrap';
-    tempSpan.style.wordWrap = 'break-word';
-    tempSpan.style.maxWidth = `${maxLineWidth}px`;
+    const lines = currentText.split('\n');
+    let currentLine = 0;
+    let posInCurrentLine = 0;
+    let charsTraversed = 0;
     
-    // Insert text up to cursor position
-    tempSpan.textContent = currentText.substring(0, cursorPosition);
-    document.body.appendChild(tempSpan);
-    
-    // Get the position of the cursor
-    const range = document.createRange();
-    const textNode = tempSpan.firstChild;
-    
-    if (textNode) {
-        range.setStart(textNode, cursorPosition);
-        range.setEnd(textNode, cursorPosition);
-        const rect = range.getBoundingClientRect();
-        
-        // Calculate position relative to text start
-        const textOverlayRect = textOverlay.getBoundingClientRect();
-        const offsetX = rect.left - textOverlayRect.left;
-        const offsetY = rect.top - textOverlayRect.top;
-        
-        // Position the cursor
-        textCursor.style.left = `${textX + offsetX}px`;
-        textCursor.style.top = `${textY - 16 + offsetY}px`;
-    } else {
-        // If there's no text yet, position at the start
-        textCursor.style.left = `${textX}px`;
-        textCursor.style.top = `${textY - 16}px`;
+    // Find current line and position
+    for (let i = 0; i < lines.length; i++) {
+        if (charsTraversed + lines[i].length + 1 > cursorPosition) {
+            currentLine = i;
+            posInCurrentLine = cursorPosition - charsTraversed;
+            break;
+        }
+        charsTraversed += lines[i].length + 1;
     }
     
-    // Clean up
-    document.body.removeChild(tempSpan);
+    // Measure text width up to cursor position
+    const lineText = lines[currentLine].substring(0, posInCurrentLine);
+    ctx.font = `${fontSize}px ${fontFamily}`;
+    const textWidth = ctx.measureText(lineText).width;
+    
+    // Position cursor
+    const cursorX = textX + textWidth;
+    const cursorY = textY + (currentLine * lineHeight);
+    
+    textCursor.style.left = `${cursorX}px`;
+    textCursor.style.top = `${cursorY - fontSize}px`;
+    textCursor.style.height = `${fontSize}px`;
+    
+    // Reset blinking
+    startCursorBlink();
 }
 
 function handleKeyDown(e) {
@@ -321,20 +324,14 @@ function handleKeyDown(e) {
     
     // Handle special keys
     if (e.key === 'Escape') {
-        endTextInput();
+        saveCurrentTextBlock();
         return;
     }
     
     if (e.key === 'Enter') {
-        if (e.shiftKey) {
-            // Add newline
-            currentText = currentText.substring(0, cursorPosition) + '\n' + currentText.substring(cursorPosition);
-            cursorPosition++;
-        } else {
-            // Finish text input
-            finishTextInput();
-            return;
-        }
+        // Add newline
+        currentText = currentText.substring(0, cursorPosition) + '\n' + currentText.substring(cursorPosition);
+        cursorPosition++;
     } 
     else if (e.key === 'Backspace') {
         if (cursorPosition > 0) {
@@ -357,6 +354,9 @@ function handleKeyDown(e) {
             cursorPosition++;
         }
     }
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        moveVertical(e.key === 'ArrowUp' ? -1 : 1);
+    }
     else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
         // Regular character input
         currentText = currentText.substring(0, cursorPosition) + e.key + currentText.substring(cursorPosition);
@@ -367,102 +367,227 @@ function handleKeyDown(e) {
     textOverlay.textContent = currentText;
     updateCursorPosition();
     
-    // Prevent default behavior for handled keys
+    // Prevent default behavior
     e.preventDefault();
 }
 
-function finishTextInput() {
-    if (currentText.trim() !== '') {
-        drawTextToCanvas();
+// Handle vertical cursor movement
+function moveVertical(direction) {
+    const lines = currentText.split('\n');
+    let currentLine = 0;
+    let posInLine = 0;
+    let charsTraversed = 0;
+    
+    // Find current line and position
+    for (let i = 0; i < lines.length; i++) {
+        if (charsTraversed + lines[i].length + 1 > cursorPosition) {
+            currentLine = i;
+            posInLine = cursorPosition - charsTraversed;
+            break;
+        }
+        charsTraversed += lines[i].length + 1;
     }
+    
+    // Calculate target line
+    const targetLine = Math.max(0, Math.min(lines.length - 1, currentLine + direction));
+    if (targetLine === currentLine) return;
+    
+    // Calculate position in target line
+    const targetLineLength = lines[targetLine].length;
+    const targetPosInLine = Math.min(posInLine, targetLineLength);
+    
+    // Calculate new cursor position
+    let newPosition = 0;
+    for (let i = 0; i < targetLine; i++) {
+        newPosition += lines[i].length + 1;
+    }
+    newPosition += targetPosInLine;
+    
+    cursorPosition = newPosition;
+}
+
+function saveCurrentTextBlock() {
+    if (currentText.trim() !== '') {
+        if (editingBlockIndex !== -1) {
+            // Update existing block
+            textBlocks[editingBlockIndex] = {
+                x: textX,
+                y: textY,
+                text: currentText
+            };
+        } else {
+            // Add new text block
+            textBlocks.push({
+                x: textX,
+                y: textY,
+                text: currentText
+            });
+        }
+        
+        // Redraw all text
+        redrawCanvas();
+    }
+    
     endTextInput();
 }
 
 function endTextInput() {
     isTyping = false;
+    stopCursorBlink();
     textCursor.style.display = 'none';
     textOverlay.style.display = 'none';
-    textOverlay.textContent = ''; // Clear the text overlay
+    textOverlay.textContent = '';
     currentText = '';
+    editingBlockIndex = -1;
 }
 
-function drawTextToCanvas() {
-    ctx.font = '16px "Helvetica Neue", Arial, sans-serif';
+function redrawCanvas() {
+    fillCanvasBackground();
+    redrawTextBlocks();
+}
+
+function redrawTextBlocks() {
+    ctx.font = `${fontSize}px ${fontFamily}`;
     ctx.fillStyle = '#000';
     
-    // Create a temporary element to measure wrapped text
-    const tempDiv = document.createElement('div');
-    tempDiv.style.font = ctx.font;
-    tempDiv.style.position = 'absolute';
-    tempDiv.style.visibility = 'hidden';
-    tempDiv.style.width = `${maxLineWidth}px`;
-    tempDiv.style.whiteSpace = 'pre-wrap';
-    tempDiv.style.wordWrap = 'break-word';
-    tempDiv.textContent = currentText;
-    document.body.appendChild(tempDiv);
-    
-    // Measure line heights
-    const computedStyle = window.getComputedStyle(tempDiv);
-    const lineHeight = parseInt(computedStyle.lineHeight) || 20;
-    
-    // Generate wrapped text lines using canvas context
-    const words = currentText.split(' ');
-    let line = '';
-    const lines = [];
-    
-    for (let i = 0; i < words.length; i++) {
-        const testLine = line + words[i] + ' ';
-        const metrics = ctx.measureText(testLine);
-        const testWidth = metrics.width;
-        
-        if (testWidth > maxLineWidth && i > 0) {
-            lines.push(line);
-            line = words[i] + ' ';
-        } else {
-            line = testLine;
-        }
-    }
-    lines.push(line);
-    
-    // Handle manual line breaks
-    const finalLines = [];
-    lines.forEach(line => {
-        const segments = line.split('\n');
-        segments.forEach((segment, index) => {
-            finalLines.push(segment);
-        });
+    textBlocks.forEach(block => {
+        drawTextBlock(block);
     });
-    
-    // Draw text to canvas
-    finalLines.forEach((line, index) => {
-        ctx.fillText(line, textX, textY + index * lineHeight);
-    });
-    
-    // Clean up
-    document.body.removeChild(tempDiv);
 }
 
-// Save canvas as PNG with white background
-function saveCanvas() {
-    // If currently typing, finish the text first
-    if (isTyping) {
-        finishTextInput();
+function drawTextBlock(block) {
+    const lines = block.text.split('\n');
+    
+    lines.forEach((line, index) => {
+        const y = block.y + index * lineHeight;
+        ctx.fillText(line, block.x, y);
+    });
+}
+
+// Find text block at coordinates
+function findTextBlockAt(x, y) {
+    for (let i = textBlocks.length - 1; i >= 0; i--) {
+        const block = textBlocks[i];
+        const lines = block.text.split('\n');
+        const blockHeight = lines.length * lineHeight;
+        
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        
+        // Find max width of lines
+        let maxWidth = 0;
+        lines.forEach(line => {
+            const lineWidth = ctx.measureText(line).width;
+            maxWidth = Math.max(maxWidth, lineWidth);
+        });
+        
+        // Check if point is within block bounds
+        if (x >= block.x && x <= block.x + maxWidth &&
+            y >= block.y - fontSize && y <= block.y + blockHeight - fontSize/2) {
+            return i;
+        }
     }
     
-    // Create temporary canvas to ensure white background
+    return -1;
+}
+
+// Edit existing text block
+function editTextBlock(blockIndex, clickX, clickY) {
+    const block = textBlocks[blockIndex];
+    
+    // Set editing state
+    editingBlockIndex = blockIndex;
+    textX = block.x;
+    textY = block.y;
+    currentText = block.text;
+    
+    // Position cursor at click
+    positionCursorAtPoint(clickX, clickY);
+    
+    // Show text for editing
+    isTyping = true;
+    textOverlay.textContent = currentText;
+    textOverlay.style.font = `${fontSize}px ${fontFamily}`;
+    textOverlay.style.left = `${textX}px`;
+    textOverlay.style.top = `${textY - fontSize}px`;
+    textOverlay.style.maxWidth = `${maxLineWidth}px`;
+    textOverlay.style.display = 'block';
+    textOverlay.style.opacity = '1';
+    
+    // Show cursor
+    textCursor.style.display = 'block';
+    updateCursorPosition();
+    
+    // Hide this block while editing
+    const tempBlocks = [...textBlocks];
+    tempBlocks.splice(blockIndex, 1);
+    
+    // Redraw without this block
+    fillCanvasBackground();
+    
+    ctx.font = `${fontSize}px ${fontFamily}`;
+    ctx.fillStyle = '#000';
+    
+    tempBlocks.forEach(block => {
+        drawTextBlock(block);
+    });
+}
+
+// Position cursor at click point
+function positionCursorAtPoint(x, y) {
+    const lines = currentText.split('\n');
+    
+    // Calculate clicked line
+    const lineIndex = Math.floor((y - (textY - fontSize)) / lineHeight);
+    if (lineIndex < 0 || lineIndex >= lines.length) {
+        cursorPosition = currentText.length;
+        return;
+    }
+    
+    // Find position in that line
+    const line = lines[lineIndex];
+    
+    // Measure characters to find closest position
+    ctx.font = `${fontSize}px ${fontFamily}`;
+    
+    let bestPos = 0;
+    let bestDistance = Number.MAX_VALUE;
+    
+    for (let i = 0; i <= line.length; i++) {
+        const textWidth = ctx.measureText(line.substring(0, i)).width;
+        const charX = textX + textWidth;
+        const distance = Math.abs(charX - x);
+        
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestPos = i;
+        }
+    }
+    
+    // Calculate full position
+    let fullPos = 0;
+    for (let i = 0; i < lineIndex; i++) {
+        fullPos += lines[i].length + 1;
+    }
+    fullPos += bestPos;
+    
+    cursorPosition = fullPos;
+}
+
+// Save canvas as PNG
+function saveCanvas() {
+    if (isTyping) {
+        saveCurrentTextBlock();
+    }
+    
     const tempCanvas = document.createElement('canvas');
     const tempCtx = tempCanvas.getContext('2d');
     tempCanvas.width = canvas.width;
     tempCanvas.height = canvas.height;
     
-    // Fill with white background
     tempCtx.fillStyle = 'white';
     tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-    
-    // Draw original canvas content
     tempCtx.drawImage(canvas, 0, 0);
     
-    // Save as PNG
     const link = document.createElement('a');
     link.download = 'voidcanvas.png';
     link.href = tempCanvas.toDataURL('image/png');
